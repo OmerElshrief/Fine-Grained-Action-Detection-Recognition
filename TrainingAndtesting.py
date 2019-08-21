@@ -162,86 +162,78 @@ def validation_step(classification_model, train_dataloader, criterion):
   return val_loss, valid_correct
 
 
-def test(classification_model, model_type, data_path, label_path, data_from_numpy, subject_id, test_subjects, batch_size,
-         background_sub=False, criterion=nn.CrossEntropyLoss()):
-    '''
-    Parameters:
-    subject_id: initial subject_id, the starting point
-    test_subjects: Number of test subjects
-    '''
-    probability = nn.Softmax()
-    test_count, valid_correct, valid_count = 0, 0, 0
-    threshold = subject_id + test_subjects
-    session_id = 1
-    while subject_id < threshold:
+def test_step(classification_model, train_dataloader):
+      val_loss, valid_correct = 0, 0
+  probability = nn.Softmax()
+  predictions = []
+  for x1,x2,x3,x4,y_true in train_dataloader:
+      y_true= y_true.type(torch.LongTensor)
+      y_true = y_true.cuda()
+      
+      with torch.no_grad():
+        x = {1:x1.cuda() , 2:x2.cuda() , 3:x3.cuda() , 4:x4.cuda()}
+        y_pred = classification_model.forward(x)
+        del x
+        torch.cuda.empty_cache()
+        y_pred = y_pred.view(-1,6)
+        y_pred = probability(y_pred)
+        y_pred = y_pred.max(1)[1]
+        
+        valid_correct +=  (y_true == y_pred).sum()
+        torch.cuda.empty_cache()
+        y_pred = y_pred.cpu()
+        y_pred = list(chain.from_iterable(repeat(n, 6) for n in y_pred))
+        predictions.append((y_pred))
+  return test_correct, predictions
 
-        # Loading the videos and labels one at a time from the stored Numpy files
-        # path = data_path + str(subject_id)+"_"+str(session_id)+"_fps_"+str(fps)+'.npy'
-       # Loading the videos and labels one at a time from the stored Numpy files or from Stored Videos
-        path = data_path + "/" + str(subject_id) + \
-            "_" + str(session_id)+"_crop.mp4"
-        if os.path.exists(path):  # check whether this file exists in the directory
-          labels_path = label_path + \
-              str(subject_id) + "_" + str(session_id)+"_label.mat"
 
-          data, labels, count = get_data(
-              path, labels_path, True, background_sub=background_sub, data_from_numpy=from_numpy)
-          test_count += count
-          my_dataset = utils.TensorDataset(data, labels)  # create your datset
-          train_dataloader = utils.DataLoader(
-              my_dataset, batch_size=batch_size, shuffle=False)
-          del data, labels, my_dataset  # To free some CUDA Memory
+def predict(classification_model,data_path, labels_path, subject_id, no_testSubjects, batch_size):
+   test_correct = 0
+   threshold = subject_id + no_testSubjects+1
+   results, predictions, gt = [],[],[]
+  
+   while subject_id < threshold:
 
-          score = []
-          predictions = []
-          for batch, y_true in train_dataloader:
-              y_true = y_true.type(torch.LongTensor)
-              y_true = y_true.cuda()
-              batch = (batch.cuda())
-              with torch.no_grad():
-                y_pred = classification_model(batch)
-                y_pred = y_pred.view(-1, 6)
-
-                valid_correct += (y_true == y_pred.max(1)[1]).sum()
-                loss = criterion(y_pred, y_true)
-                val_loss += loss.item()
-                y_pred = probability(y_pred)
-                y_pred = y_pred.cpu().numpy()
-
-                y_pred = list(chain.from_iterable(repeat(n, 6)
-                                                  for n in y_pred))
-                predictions.append(np.array(y_pred))
-
-          predictions = np.array(predictions)
-          predictions = predictions.reshape(
-              predictions.shape[0]*predictions.shape[1], 6)
-          print(predictions.shape)
-          print(len(original_labels))
-
-          while len(original_labels) > len(predictions):
-            original_labels = original_labels[:-1]
-          while len(original_labels) < len(predictions):
-            predictions = predictions[:-1]
-          print(len(predictions))
-          print(len(original_labels))
-          score.append(evaluate_average_percision(
-              label_to_one_hot(original_labels).numpy(), predictions, 6))
-          del batch
-
-          torch.cuda.empty_cache()
-        session_id += 1
-        if session_id > 3:
-          subject_id += 1
-          session_id = 1
-
-    avg_precision = 0
-    for i in range(len(score)):
-           avg_precision += score[i][2]['micro']
-    avg_precision = avg_precision / len(score)
-
-    valid_accu = int(valid_correct) / valid_count
-    print('Tess Results: ', int(valid_correct), ' out of: ', valid_count)
-    print('Accuracy: ', valid_accu)
-    print('Loss', str(val_loss / valid_count))
-    print('average precision: ', avg_precision)
-    return score
+            # Loading the videos and labels one at a time from the stored Numpy files
+            path =  data_path +  str(subject_id) + "_" + str(session_id)+ '.npy'
+            if  os.path.exists(path): # check whether this file exists in the directory
+              labels_path =  label_path + str(subject_id) +"_" + str(session_id)+'_label.mat'
+              data , original_labels, count = get_data_MS(path,labels_path,sample_labels = False )
+              labels = original_labels[[i for i in range(0,len(original_labels),6)]]
+              while (len(labels) > len(data)):
+                list(labels).remove(labels[len(labels)-1])
+              while (len(labels) < len(data)):
+                list(labels).append(labels[len(labels)-1])
+              
+              
+              labels = torch.tensor(labels)
+             
+              train_dataloader = get_data_loader(data,labels,batch_size=batch_size)
+              correct,predictions = test_step(classification_model,train_dataloader,optimizer,criterion)
+              torch.cuda.empty_cache()
+              
+              test_correct += correct
+              predictions = np.array(predictions)
+              predictions = predictions.reshape(predictions.shape[0]*predictions.shape[1])
+              
+              while len(original_labels) > len(predictions):
+                list(predictions).append(predictions[len(predictions)-1])
+              while len(original_labels) < len(predictions):
+                predictions = predictions[:-1]
+              gt.append((original_labels))
+              results.append((predictions))
+            else:
+                print('No such path:' ,path)
+            # Next Video    
+            session_id += 1
+            if session_id > 3:
+              subject_id += 1
+              session_id = 1
+    
+    
+   gt = list(itertools.chain.from_iterable(gt))
+   gt = [i.item() for i in gt]
+   results =  list(itertools.chain.from_iterable(results))
+   mav = evaluate(results,gt)  
+   print('average precision: ',mav)
+   return mav
